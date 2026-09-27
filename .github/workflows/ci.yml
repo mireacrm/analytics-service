@@ -98,3 +98,105 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  secrets-check:
+    name: Проверка доступов
+    runs-on: ubuntu-latest
+    outputs:
+      dockerhub: ${{ steps.check.outputs.dockerhub }}
+      yandex: ${{ steps.check.outputs.yandex }}
+    steps:
+      - id: check
+        # Контекст секретов недоступен в условии работы, поэтому наличие
+        # доступов вычисляется шагом и передаётся дальше как результат.
+        run: |
+          echo "dockerhub=${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+          echo "yandex=${{ secrets.YC_KEYS != '' && secrets.YC_REGISTRY_ID != '' }}" >> "$GITHUB_OUTPUT"
+
+  dockerhub:
+    name: Публикация в DockerHub
+    needs: [tests, secrets-check]
+    # Без доступов работа пропускается, а не падает: форк или репозиторий
+    # без настроенных секретов не должен краснеть из-за чужого реестра.
+    if: github.ref == 'refs/heads/main' && needs.secrets-check.outputs.dockerhub == 'true'
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/mireacrm-analytics-service
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  yandex-cloud:
+    name: Развёртывание в Яндекс.Облаке
+    needs: [tests, secrets-check]
+    if: github.ref == 'refs/heads/main' && needs.secrets-check.outputs.yandex == 'true'
+    runs-on: ubuntu-latest
+    # Оба сервиса пары billing/analytics слушают брокер; analytics выбран
+    # потому, что его отчёты читают только собственную базу. При старте он
+    # подписывается на готовую очередь analytics-service.events и сам её
+    # не создаёт: AMQP_URL должен вести на брокер с топологией MireaCRM
+    # (deploy/rabbitmq/definitions.json), иначе контейнер не поднимется.
+    env:
+      IMAGE: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/analytics-service
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Вход в реестр
+        uses: docker/login-action@v3
+        with:
+          registry: cr.yandex
+          username: json_key
+          password: ${{ secrets.YC_KEYS }}
+
+      - name: Сборка и публикация
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE }}:latest,${{ env.IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Развёртывание бессерверного контейнера
+        uses: yc-actions/yc-sls-container-deploy@v3
+        with:
+          yc-sa-json-credentials: ${{ secrets.YC_KEYS }}
+          folder-id: ${{ secrets.YC_FOLDER_ID }}
+          container-name: ${{ secrets.YC_CONTAINER_NAME }}
+          revision-image-url: ${{ env.IMAGE }}:${{ github.sha }}
+          revision-service-account-id: ${{ secrets.YC_SA_ID }}
+          # Контейнер останавливается между вызовами и ничего не хранит:
+          # база и брокер должны быть внешними и доступными из сети.
+          # Бессерверная платформа принимает запросы только на 8080;
+          # gRPC-порт здесь не используется.
+          revision-env: |
+            ANALYTICS_POSTGRES_DSN=${{ secrets.ANALYTICS_POSTGRES_DSN }}
+            ANALYTICS_AMQP_URL=${{ secrets.AMQP_URL }}
+            ANALYTICS_HTTP_PORT=8080
