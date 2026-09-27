@@ -181,6 +181,10 @@ jobs:
           context: .
           push: true
           tags: ${{ env.IMAGE }}:latest,${{ env.IMAGE }}:${{ github.sha }}
+          # Реестр Яндекса не принимает индекс манифестов с аттестациями,
+          # которые buildx прикладывает по умолчанию.
+          provenance: false
+          sbom: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
