@@ -193,7 +193,9 @@ jobs:
         with:
           yc-sa-json-credentials: ${{ secrets.YC_KEYS }}
           folder-id: ${{ secrets.YC_FOLDER_ID }}
-          container-name: ${{ secrets.YC_CONTAINER_NAME }}
+          # Контейнер называется как репозиторий: тогда все доступы к облаку
+          # общие и лежат в секретах организации.
+          container-name: ${{ github.event.repository.name }}
           revision-image-url: ${{ env.IMAGE }}:${{ github.sha }}
           revision-service-account-id: ${{ secrets.YC_SA_ID }}
           # Контейнер останавливается между вызовами и ничего не хранит:
